@@ -1,0 +1,31 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+# Python bytecode / caches
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Build / training outputs
+out/
+__pycache__/
+out/
+*.py[cod]
+*$py.class
+__pycache__/
+out/
+*.py[cod]
+*$py.class
+
+# datasets / local data
+data/
+
+# datasets / local data
+data/
