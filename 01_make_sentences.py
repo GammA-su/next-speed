@@ -1,4 +1,5 @@
 import os
+import re
 import json
 import time
 from multiprocessing import Pool
@@ -25,28 +26,42 @@ SEED = int(os.environ.get("SEED", "0"))
 DETERMINISTIC = os.environ.get("DETERMINISTIC", "1") == "1"
 
 segmenter = pysbd.Segmenter(language=LANG, clean=True)
+segmenter_raw = pysbd.Segmenter(language=LANG, clean=False)
 _worker_segmenter = None
+_worker_segmenter_raw = None
 _worker_min_len = None
 _worker_max_len = None
 
 
+def _segment_text(segmenter_clean, segmenter_fallback, text: str):
+    try:
+        return [s.strip() for s in segmenter_clean.segment(text) if s.strip()]
+    except re.error:
+        # pysbd cleaner can choke on bad escapes; retry without cleaning.
+        try:
+            return [s.strip() for s in segmenter_fallback.segment(text) if s.strip()]
+        except re.error:
+            return []
+
+
 def segment(text: str):
-    sents = [s.strip() for s in segmenter.segment(text) if s.strip()]
+    sents = _segment_text(segmenter, segmenter_raw, text)
     # basic filters (tune)
     sents = [s for s in sents if MIN_LEN <= len(s) <= MAX_LEN]
     return sents
 
 
 def _init_worker(lang: str, min_len: int, max_len: int) -> None:
-    global _worker_segmenter, _worker_min_len, _worker_max_len
+    global _worker_segmenter, _worker_segmenter_raw, _worker_min_len, _worker_max_len
     _worker_segmenter = pysbd.Segmenter(language=lang, clean=True)
+    _worker_segmenter_raw = pysbd.Segmenter(language=lang, clean=False)
     _worker_min_len = min_len
     _worker_max_len = max_len
 
 
 def _segment_worker(task):
     doc_id, extra, text = task
-    sents = [s.strip() for s in _worker_segmenter.segment(text) if s.strip()]
+    sents = _segment_text(_worker_segmenter, _worker_segmenter_raw, text)
     sents = [s for s in sents if _worker_min_len <= len(s) <= _worker_max_len]
     return doc_id, extra, sents
 
