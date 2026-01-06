@@ -15,4 +15,5 @@ dependencies = [
     "tqdm>=4.67.1",
     "transformers>=4.57.3",
     "uvicorn>=0.30.0",
+    "orjson>=3.11.5",
 ]

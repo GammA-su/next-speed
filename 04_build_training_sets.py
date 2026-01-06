@@ -1,11 +1,17 @@
 import os
 import json
-import random
+import time
+import zlib
+from collections import deque
+
 import numpy as np
-import faiss
-from tqdm import tqdm
 
 from utils import seed_all, save_json
+
+try:
+    import orjson as _orjson
+except ImportError:
+    _orjson = None
 
 SENT_PATH = os.environ.get("SENT_PATH", "data/sentences.jsonl")
 EMB_PATH = os.environ.get("EMB_PATH", "data/embeddings.npy")
@@ -24,28 +30,44 @@ CONTEXT_SENTS = int(os.environ.get("CONTEXT_SENTS", "6"))
 VAL_FRAC = float(os.environ.get("VAL_FRAC", "0.05"))
 SEED = int(os.environ.get("SEED", "0"))
 DETERMINISTIC = os.environ.get("DETERMINISTIC", "1") == "1"
+MAX_ROWS = int(os.environ.get("MAX_ROWS", "-1"))
+LOG_EVERY = int(os.environ.get("LOG_EVERY", "200000"))
+REUSE_CODES = os.environ.get("REUSE_CODES", "1") == "1"
+
+_IO_BUFFER = 1024 * 1024
+_CRC32_SCALE = 1 << 32
 
 
-def encode_rvq(x, centroids):
-    # x: (N,D) normalized
-    n, d = x.shape
-    codes = np.zeros((n, centroids.shape[0]), dtype=np.int32)
-    residual = x.copy()
+if _orjson is not None:
+    def _json_loads(line):
+        return _orjson.loads(line)
 
-    for k in range(centroids.shape[0]):
-        C = centroids[k].astype("float32")
-        faiss.normalize_L2(C)
-        index = faiss.IndexFlatIP(d)
-        index.add(C)
-        _, ids = index.search(residual, 1)
-        ids = ids.reshape(-1)
-        codes[:, k] = ids
+    def _dumps_lm(obj):
+        if hasattr(_orjson, "OPT_ESCAPE_UNICODE"):
+            return _orjson.dumps(obj, option=_orjson.OPT_ESCAPE_UNICODE)
+        return _orjson.dumps(obj)
 
-        residual = residual - C[ids]
-        rn = np.linalg.norm(residual, axis=1, keepdims=True) + 1e-8
-        residual = residual / rn
+    def _dumps_dec(obj):
+        return _orjson.dumps(obj)
+else:
+    def _json_loads(line):
+        return json.loads(line.decode("utf-8"))
 
-    return codes
+    def _dumps_lm(obj):
+        return json.dumps(obj, ensure_ascii=True).encode("utf-8")
+
+    def _dumps_dec(obj):
+        return json.dumps(obj, ensure_ascii=False).encode("utf-8")
+
+
+def _is_val_doc(doc_id):
+    if VAL_FRAC <= 0:
+        return False
+    if VAL_FRAC >= 1:
+        return True
+    key = f"{SEED}|{doc_id}".encode("utf-8")
+    h = zlib.crc32(key) & 0xFFFFFFFF
+    return h < int(VAL_FRAC * _CRC32_SCALE)
 
 
 def main():
@@ -56,27 +78,20 @@ def main():
     os.makedirs(os.path.dirname(OUT_DEC), exist_ok=True)
     os.makedirs(os.path.dirname(OUT_DEC_VAL), exist_ok=True)
 
-    x = np.load(EMB_PATH).astype("float32")
-    centroids = np.load(RVQ_PATH)["centroids"].astype("float32")
+    if not REUSE_CODES:
+        raise ValueError("REUSE_CODES=0 is not supported; run step 3 to generate codes.")
+    if not os.path.isfile(OUT_CODES):
+        raise FileNotFoundError(f"Missing codes file: {OUT_CODES}")
+    if not os.path.isfile(SENT_PATH):
+        raise FileNotFoundError(f"Missing sentences file: {SENT_PATH}")
 
-    codes = encode_rvq(x, centroids)
-    np.save(OUT_CODES, codes)
-    print("Saved codes:", OUT_CODES, codes.shape)
-
-    # load sentences and group by doc
-    docs = {}
-    with open(SENT_PATH, "r", encoding="utf-8") as f:
-        idx = 0
-        for line in f:
-            r = json.loads(line)
-            docs.setdefault(r["doc_id"], []).append((idx, r["text"], r["sent_id"]))
-            idx += 1
-
-    doc_ids = list(docs.keys())
-    rng = random.Random(SEED)
-    rng.shuffle(doc_ids)
-    n_val = int(len(doc_ids) * VAL_FRAC)
-    val_set = set(doc_ids[:n_val]) if n_val > 0 else set()
+    print("Phase: load codes")
+    codes = np.load(OUT_CODES, mmap_mode="r")
+    if codes.ndim != 2:
+        raise ValueError(f"Expected codes to be 2D, got shape {codes.shape}")
+    if codes.shape[1] != K:
+        raise ValueError(f"codes K mismatch: codes.shape[1]={codes.shape[1]} K={K}")
+    print("Loaded codes:", OUT_CODES, codes.shape)
 
     counts = {
         "lm_train": 0,
@@ -84,63 +99,123 @@ def main():
         "dec_train": 0,
         "dec_val": 0,
     }
+    total_rows = 0
+    sent_rows = 0
+    docs_seen = 0
+    start = time.time()
+    next_log_rows = LOG_EVERY if LOG_EVERY > 0 else None
+    next_log_seen = LOG_EVERY if LOG_EVERY > 0 else None
 
-    with open(OUT_LM, "w", encoding="utf-8") as flm_train, \
-        open(OUT_LM_VAL, "w", encoding="utf-8") as flm_val, \
-        open(OUT_DEC, "w", encoding="utf-8") as fdec_train, \
-        open(OUT_DEC_VAL, "w", encoding="utf-8") as fdec_val:
-        for doc_id in tqdm(doc_ids, desc="build"):
-            items = docs[doc_id]
-            if len(items) <= CONTEXT_SENTS:
-                continue
+    def maybe_log_rows():
+        nonlocal next_log_rows
+        if next_log_rows is None:
+            return
+        if total_rows >= next_log_rows:
+            elapsed = time.time() - start
+            rate = total_rows / elapsed if elapsed > 0 else 0.0
+            print(
+                f"rows_written={total_rows} sent_rows={sent_rows} "
+                f"docs_seen={docs_seen} elapsed={elapsed:.1f}s rows/sec={rate:.2f}",
+                flush=True,
+            )
+            next_log_rows += LOG_EVERY
 
-            is_val = doc_id in val_set
-            flm = flm_val if is_val else flm_train
-            fdec = fdec_val if is_val else fdec_train
+    def maybe_log_seen():
+        nonlocal next_log_seen
+        if next_log_seen is None:
+            return
+        if sent_rows >= next_log_seen:
+            elapsed = time.time() - start
+            rate = sent_rows / elapsed if elapsed > 0 else 0.0
+            print(
+                f"sent_rows={sent_rows} docs_seen={docs_seen} "
+                f"elapsed={elapsed:.1f}s sents/sec={rate:.2f}",
+                flush=True,
+            )
+            next_log_seen += LOG_EVERY
 
-            # per sentence position
-            for i in range(CONTEXT_SENTS, len(items)):
-                ctx_items = items[i - CONTEXT_SENTS : i]
-                tgt_item = items[i]
+    print("Phase: stream sentences + build outputs")
+    stop_early = False
+    with open(SENT_PATH, "rb", buffering=_IO_BUFFER) as fin, \
+        open(OUT_LM, "wb", buffering=_IO_BUFFER) as flm_train, \
+        open(OUT_LM_VAL, "wb", buffering=_IO_BUFFER) as flm_val, \
+        open(OUT_DEC, "wb", buffering=_IO_BUFFER) as fdec_train, \
+        open(OUT_DEC_VAL, "wb", buffering=_IO_BUFFER) as fdec_val:
+        idx = 0
+        context = deque(maxlen=CONTEXT_SENTS)
+        current_doc_id = None
+        is_val = False
+        flm = flm_train
+        fdec = fdec_train
 
-                ctx_idxs = [t[0] for t in ctx_items]
-                tgt_idx = tgt_item[0]
+        for line in fin:
+            rec = _json_loads(line)
+            doc_id = rec["doc_id"]
+            if doc_id != current_doc_id:
+                current_doc_id = doc_id
+                is_val = _is_val_doc(doc_id)
+                flm = flm_val if is_val else flm_train
+                fdec = fdec_val if is_val else fdec_train
+                context.clear()
+                docs_seen += 1
 
-                ctx_codes = codes[ctx_idxs].reshape(-1).tolist()  # flatten CONTEXT_SENTS*K
-                tgt_codes = codes[tgt_idx].tolist()  # K codes
-
-                ctx_text = " ".join([t[1] for t in ctx_items])
-                tgt_text = tgt_item[1]
-
-                flm.write(
-                    json.dumps({"ctx_codes": ctx_codes, "tgt_codes": tgt_codes}) + "\n"
+            if idx >= codes.shape[0]:
+                raise RuntimeError(
+                    f"Codes shorter than sentences: idx={idx} codes_rows={codes.shape[0]}"
                 )
+
+            text = rec["text"]
+            sent_id = rec["sent_id"]
+
+            if len(context) == CONTEXT_SENTS and not stop_early:
+                ctx_idxs = [t[0] for t in context]
+                ctx_codes = codes[ctx_idxs].reshape(-1).tolist()
+                tgt_codes = codes[idx].tolist()
+                ctx_text = " ".join([t[1] for t in context])
+
+                flm.write(_dumps_lm({"ctx_codes": ctx_codes, "tgt_codes": tgt_codes}))
+                flm.write(b"\n")
                 if is_val:
                     counts["lm_val"] += 1
                 else:
                     counts["lm_train"] += 1
 
-                # textual code rendering (simple, works with any tokenizer)
-                code_str = " ".join([f"c{j}={tgt_codes[j]}" for j in range(len(tgt_codes))])
+                code_str = " ".join(
+                    [f"c{j}={tgt_codes[j]}" for j in range(len(tgt_codes))]
+                )
                 fdec.write(
-                    json.dumps(
+                    _dumps_dec(
                         {
                             "ctx_text": ctx_text,
                             "ctx_codes": ctx_codes,
                             "tgt_codes": tgt_codes,
                             "tgt_codes_str": code_str,
-                            "tgt_text": tgt_text,
+                            "tgt_text": text,
                             "doc_id": doc_id,
-                            "sent_id": tgt_item[2],
-                        },
-                        ensure_ascii=False,
+                            "sent_id": sent_id,
+                        }
                     )
-                    + "\n"
                 )
+                fdec.write(b"\n")
                 if is_val:
                     counts["dec_val"] += 1
                 else:
                     counts["dec_train"] += 1
+
+                total_rows += 1
+                maybe_log_rows()
+                if MAX_ROWS > 0 and total_rows >= MAX_ROWS:
+                    stop_early = True
+
+            context.append((idx, text))
+            idx += 1
+            sent_rows = idx
+            maybe_log_seen()
+
+        if idx != codes.shape[0]:
+            raise RuntimeError(
+                f"Sentences rows ({idx}) != codes rows ({codes.shape[0]})"
+            )
 
     meta = {
         "sent_path": SENT_PATH,
@@ -161,6 +236,9 @@ def main():
     }
     save_json(META, meta)
 
+    elapsed = time.time() - start
+    rate = total_rows / elapsed if elapsed > 0 else 0.0
+    print(f"Rows written: {total_rows} rows/sec={rate:.2f}")
     print("Wrote:", OUT_LM)
     print("Wrote:", OUT_LM_VAL)
     print("Wrote:", OUT_DEC)
