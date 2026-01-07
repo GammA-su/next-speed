@@ -1,4 +1,5 @@
 import os
+import re
 from typing import List
 
 import numpy as np
@@ -42,6 +43,40 @@ RUN_ID = os.environ.get("RUN_ID", now_id())
 OUT_PATH = os.environ.get("OUT_PATH", f"out/generate/{RUN_ID}.json")
 
 segmenter = pysbd.Segmenter(language="en", clean=True)
+
+
+def _strip_quotes(s: str) -> str:
+    s = (s or "").strip()
+    if len(s) >= 2 and ((s[0] == s[-1]) and s[0] in ("'", '"')):
+        return s[1:-1]
+    return s
+
+
+def _clean_path(s: str) -> str:
+    s = _strip_quotes(s)
+    # Strip ANSI escape sequences and control chars that can sneak in from env/terminal.
+    s = re.sub(r"\x1b\[[0-9;]*m", "", s)
+    s = re.sub(r"[\x00-\x1f\x7f]", "", s)
+    # If ESC was stripped already, remove leftover CSI fragments like "[36m".
+    s = re.sub(r"\[[0-9;]*m", "", s)
+    return s.strip()
+
+
+def _resolve_local_model_path(p: str) -> str | None:
+    clean = _clean_path(p)
+    if not clean:
+        return None
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    candidates = []
+    if os.path.isabs(clean):
+        candidates.append(clean)
+    else:
+        candidates.append(os.path.abspath(clean))
+        candidates.append(os.path.abspath(os.path.join(base_dir, clean)))
+    for cand in candidates:
+        if os.path.isdir(cand):
+            return cand
+    return None
 
 
 def split_sents(text: str):
@@ -159,8 +194,15 @@ def main():
     enc_model = AutoModel.from_pretrained(EMB_MODEL).to(DEVICE).eval()
 
     # decoder
-    dec_tok = AutoTokenizer.from_pretrained(DECODER_PATH)
-    dec = AutoModelForSeq2SeqLM.from_pretrained(DECODER_PATH).to(DEVICE).eval()
+    dec_raw = _clean_path(os.path.expanduser(os.path.expandvars(DECODER_PATH)))
+    dec_path = _resolve_local_model_path(dec_raw)
+    dec_local = dec_path is not None
+    if dec_local:
+        dec_tok = AutoTokenizer.from_pretrained(dec_path, local_files_only=True)
+        dec = AutoModelForSeq2SeqLM.from_pretrained(dec_path, local_files_only=True).to(DEVICE).eval()
+    else:
+        dec_tok = AutoTokenizer.from_pretrained(dec_raw)
+        dec = AutoModelForSeq2SeqLM.from_pretrained(dec_raw).to(DEVICE).eval()
 
     context_text = (
         "Paris is the capital of France. It is known for art and architecture. "
@@ -243,7 +285,7 @@ def main():
     meta = {
         "rvq_path": RVQ_PATH,
         "sent_lm_path": SENT_LM_PATH,
-        "decoder_path": DECODER_PATH,
+        "decoder_path": dec_path if dec_local else dec_raw,
         "emb_model": EMB_MODEL,
         "K": K,
         "V": V,

@@ -29,6 +29,34 @@ uv run python 06_train_decoder.py
 uv run python 07_generate.py
 ```
 
+## QA -> decoder (batched, GPU)
+
+If you are generating decoder training data from QA pairs:
+```bash
+# fast GPU batch run (adjust BATCH for your GPU)
+USE_CUDA=1 BATCH=1024 uv run python tools/make_decoder_from_qa.py
+
+# debug run (limit rows)
+USE_CUDA=1 BATCH=1024 MAX_ROWS=1000 uv run python tools/make_decoder_from_qa.py
+```
+
+## Mix decoder datasets (base + QA)
+
+Create a mixed decoder training file that blends the base corpus with QA/instruction data:
+```bash
+# default mix (30% QA) -> data/decoder_train_mix.jsonl
+MIX_QA_RATIO=0.30 uv run python tools/mix_decoder_jsonl.py
+
+# quick test
+MIX_QA_RATIO=0.30 MAX_ROWS=1000 uv run python tools/mix_decoder_jsonl.py
+```
+
+Train the decoder on the mixed dataset:
+```bash
+TRAIN_PATH=data/decoder_train_mix.jsonl VAL_PATH=data/decoder_val_mix.jsonl \
+  uv run python 06_train_decoder.py
+```
+
 ## LLM-style inference
 
 Install the server extras (already in `pyproject.toml`):
@@ -135,6 +163,11 @@ RVQ:
 Training sets:
 - `CONTEXT_SENTS`, `VAL_FRAC`
 - `OUT_LM`, `OUT_LM_VAL`, `OUT_DEC`, `OUT_DEC_VAL`, `TRAIN_META`
+
+Decoder mix (tools/mix_decoder_jsonl.py):
+- `BASE_TRAIN`, `QA_TRAIN`, `OUT_TRAIN`
+- `BASE_VAL`, `QA_VAL`, `OUT_VAL`
+- `MIX_QA_RATIO`, `SEED`, `MAX_ROWS`
 
 Sentence-LM:
 - `D_MODEL`, `N_LAYERS`, `N_HEADS`, `DROP`

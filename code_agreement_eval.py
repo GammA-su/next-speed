@@ -1,5 +1,6 @@
 import os
 import json
+import re
 from typing import List
 
 import numpy as np
@@ -130,6 +131,37 @@ def format_prompt(ctx_text: str, codes: List[int], v: int) -> str:
         return f"CTX: {ctx_text}\nCODES: {codes_to_special(codes, width)}\nWrite exactly one next sentence:"
     raise ValueError(f"Unknown CODE_MODE: {CODE_MODE}")
 
+def _strip_quotes(s: str) -> str:
+    s = (s or "").strip()
+    if len(s) >= 2 and ((s[0] == s[-1]) and s[0] in ("'", '"')):
+        return s[1:-1]
+    return s
+
+def _clean_path(s: str) -> str:
+    s = _strip_quotes(s)
+    # Strip ANSI escape sequences and control chars that can sneak in from env/terminal.
+    s = re.sub(r"\x1b\[[0-9;]*m", "", s)
+    s = re.sub(r"[\x00-\x1f\x7f]", "", s)
+    # If ESC was stripped already, remove leftover CSI fragments like "[36m".
+    s = re.sub(r"\[[0-9;]*m", "", s)
+    return s.strip()
+
+def _resolve_local_model_path(p: str) -> str | None:
+    clean = _clean_path(p)
+    if not clean:
+        return None
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    candidates = []
+    if os.path.isabs(clean):
+        candidates.append(clean)
+    else:
+        candidates.append(os.path.abspath(clean))
+        candidates.append(os.path.abspath(os.path.join(base_dir, clean)))
+    for cand in candidates:
+        if os.path.isdir(cand):
+            return cand
+    return None
+
 
 def main():
     seed_all(SEED, deterministic=DETERMINISTIC)
@@ -144,8 +176,23 @@ def main():
     enc_tok = AutoTokenizer.from_pretrained(EMB_MODEL)
     enc_model = AutoModel.from_pretrained(EMB_MODEL).to(DEVICE).eval()
 
-    dec_tok = AutoTokenizer.from_pretrained(DECODER_PATH)
-    dec = AutoModelForSeq2SeqLM.from_pretrained(DECODER_PATH).to(DEVICE).eval()
+    dec_raw = _clean_path(os.path.expanduser(os.path.expandvars(DECODER_PATH)))
+    dec_path = _resolve_local_model_path(dec_raw)
+    dec_local = dec_path is not None
+    if not dec_local:
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        print(f"decoder_path_raw={dec_raw!r} cwd={os.getcwd()} base_dir={base_dir}")
+        print(
+            "decoder_path_candidates="
+            f"{[os.path.abspath(dec_raw), os.path.abspath(os.path.join(base_dir, dec_raw))]!r}"
+        )
+    print(f"decoder_path={dec_path if dec_local else dec_raw} local={dec_local}")
+    if dec_local:
+        dec_tok = AutoTokenizer.from_pretrained(dec_path, local_files_only=True)
+        dec = AutoModelForSeq2SeqLM.from_pretrained(dec_path, local_files_only=True).to(DEVICE).eval()
+    else:
+        dec_tok = AutoTokenizer.from_pretrained(dec_raw)
+        dec = AutoModelForSeq2SeqLM.from_pretrained(dec_raw).to(DEVICE).eval()
 
     total = 0
     head_match = np.zeros(ckpt["cfg"]["K"], dtype=np.int64)

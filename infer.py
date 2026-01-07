@@ -1,4 +1,5 @@
 import os
+import re
 from typing import Any, Dict, List
 
 import numpy as np
@@ -38,6 +39,40 @@ SEED = int(os.environ.get("SEED", "0"))
 DETERMINISTIC = os.environ.get("DETERMINISTIC", "1") == "1"
 
 segmenter = pysbd.Segmenter(language="en", clean=True)
+
+
+def _strip_quotes(s: str) -> str:
+    s = (s or "").strip()
+    if len(s) >= 2 and ((s[0] == s[-1]) and s[0] in ("'", '"')):
+        return s[1:-1]
+    return s
+
+
+def _clean_path(s: str) -> str:
+    s = _strip_quotes(s)
+    # Strip ANSI escape sequences and control chars that can sneak in from env/terminal.
+    s = re.sub(r"\x1b\[[0-9;]*m", "", s)
+    s = re.sub(r"[\x00-\x1f\x7f]", "", s)
+    # If ESC was stripped already, remove leftover CSI fragments like "[36m".
+    s = re.sub(r"\[[0-9;]*m", "", s)
+    return s.strip()
+
+
+def _resolve_local_model_path(p: str) -> str | None:
+    clean = _clean_path(p)
+    if not clean:
+        return None
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    candidates = []
+    if os.path.isabs(clean):
+        candidates.append(clean)
+    else:
+        candidates.append(os.path.abspath(clean))
+        candidates.append(os.path.abspath(os.path.join(base_dir, clean)))
+    for cand in candidates:
+        if os.path.isdir(cand):
+            return cand
+    return None
 
 
 def split_sents(text: str) -> List[str]:
@@ -192,8 +227,16 @@ class SentenceGenerator:
         self.enc_tok = AutoTokenizer.from_pretrained(self.emb_model)
         self.enc_model = AutoModel.from_pretrained(self.emb_model).to(self.device).eval()
 
-        self.dec_tok = AutoTokenizer.from_pretrained(self.decoder_path)
-        self.dec = AutoModelForSeq2SeqLM.from_pretrained(self.decoder_path).to(self.device).eval()
+        dec_raw = _clean_path(os.path.expanduser(os.path.expandvars(self.decoder_path)))
+        dec_path = _resolve_local_model_path(dec_raw)
+        if dec_path is not None:
+            self.decoder_path = dec_path
+            self.dec_tok = AutoTokenizer.from_pretrained(dec_path, local_files_only=True)
+            self.dec = AutoModelForSeq2SeqLM.from_pretrained(dec_path, local_files_only=True).to(self.device).eval()
+        else:
+            self.decoder_path = dec_raw
+            self.dec_tok = AutoTokenizer.from_pretrained(dec_raw)
+            self.dec = AutoModelForSeq2SeqLM.from_pretrained(dec_raw).to(self.device).eval()
 
     def _score_match(self, pred_codes: List[int], sent: str) -> int:
         e2 = embed_sentence(self.enc_tok, self.enc_model, sent, self.device)

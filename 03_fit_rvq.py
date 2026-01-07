@@ -27,6 +27,12 @@ def main():
     if FAISS_NUM_THREADS > 0:
         faiss.omp_set_num_threads(FAISS_NUM_THREADS)
 
+    num_gpus = faiss.get_num_gpus() if hasattr(faiss, "get_num_gpus") else 0
+    print(
+        f"faiss_version={getattr(faiss, '__version__', 'unknown')} num_gpus={num_gpus} "
+        f"use_faiss_gpu={USE_FAISS_GPU}"
+    )
+
     x = np.load(EMB, mmap_mode="r")
     n, d = x.shape
     train_n = n if TRAIN_N <= 0 or TRAIN_N >= n else TRAIN_N
@@ -37,18 +43,15 @@ def main():
     else:
         x_train = np.asarray(x, dtype="float32")
 
-    use_gpu = USE_FAISS_GPU and hasattr(faiss, "StandardGpuResources")
+    use_gpu = USE_FAISS_GPU and num_gpus > 0 and hasattr(faiss, "StandardGpuResources")
     gpu_res = None
     if use_gpu:
         try:
-            if faiss.get_num_gpus() <= 0:
-                use_gpu = False
-            else:
-                gpu_res = faiss.StandardGpuResources()
+            gpu_res = faiss.StandardGpuResources()
         except Exception:
             use_gpu = False
     if use_gpu:
-        print(f"Using FAISS GPU (gpus={faiss.get_num_gpus()})")
+        print(f"Using FAISS GPU (gpus={num_gpus})")
     else:
         print("Using FAISS CPU")
 
