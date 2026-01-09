@@ -4,11 +4,11 @@ import random
 import re
 
 BASE_TRAIN = os.environ.get("BASE_TRAIN", "data/decoder_train.jsonl")
-QA_TRAIN = os.environ.get("QA_TRAIN", "data/decoder_train_qa.jsonl")
+AUX_TRAIN = os.environ.get("AUX_TRAIN", os.environ.get("QA_TRAIN", "data/decoder_train_qa.jsonl"))
 OUT_TRAIN = os.environ.get("OUT_TRAIN", "data/decoder_train_mix.jsonl")
 
 BASE_VAL = os.environ.get("BASE_VAL", "data/decoder_val.jsonl")
-QA_VAL = os.environ.get("QA_VAL", "data/decoder_val_qa.jsonl")
+AUX_VAL = os.environ.get("AUX_VAL", os.environ.get("QA_VAL", "data/decoder_val_qa.jsonl"))
 OUT_VAL = os.environ.get("OUT_VAL", "data/decoder_val_mix.jsonl")
 
 MIX_QA_RATIO = float(os.environ.get("MIX_QA_RATIO", "0.30"))
@@ -90,16 +90,16 @@ def _write_checked(line, source, fout, stats):
     if source == "base":
         stats["rows_out_base"] += 1
     else:
-        stats["rows_out_qa"] += 1
+        stats["rows_out_aux"] += 1
     return True
 
 
-def _mix_split(base_path, qa_path, out_path, ratio, seed, max_rows=-1):
+def _mix_split(base_path, aux_path, out_path, ratio, seed, max_rows=-1):
     if not os.path.exists(base_path):
         raise FileNotFoundError(f"Missing base file: {base_path}")
-    if not os.path.exists(qa_path):
-        print(f"Missing QA file: {qa_path} (will copy base only)")
-        qa_path = None
+    if not os.path.exists(aux_path):
+        print(f"Missing AUX file: {aux_path} (will copy base only)")
+        aux_path = None
 
     if ratio < 0.0 or ratio >= 1.0:
         raise ValueError(f"MIX_QA_RATIO must be in [0,1), got {ratio}")
@@ -107,15 +107,15 @@ def _mix_split(base_path, qa_path, out_path, ratio, seed, max_rows=-1):
     base_count = _count_lines(base_path, max_rows=max_rows)
     target_qa = int(round(base_count * ratio / max(1e-9, 1.0 - ratio)))
 
-    qa_indices = []
-    qa_total = 0
-    if qa_path:
-        qa_indices, qa_total = _reservoir_sample_indices(qa_path, target_qa, seed)
+    aux_indices = []
+    aux_total = 0
+    if aux_path:
+        aux_indices, aux_total = _reservoir_sample_indices(aux_path, target_qa, seed)
 
-    qa_used_target = len(qa_indices)
-    if qa_path and qa_used_target < target_qa:
+    aux_used_target = len(aux_indices)
+    if aux_path and aux_used_target < target_qa:
         print(
-            f"QA smaller than target ratio: qa_total={qa_total} target_qa={target_qa} using_all_qa={qa_used_target}"
+            f"AUX smaller than target ratio: aux_total={aux_total} target_aux={target_qa} using_all_aux={aux_used_target}"
         )
 
     out_dir = os.path.dirname(out_path)
@@ -124,10 +124,10 @@ def _mix_split(base_path, qa_path, out_path, ratio, seed, max_rows=-1):
 
     stats = {
         "rows_in_base": base_count,
-        "rows_in_qa": qa_used_target,
+        "rows_in_aux": aux_used_target,
         "rows_out": 0,
         "rows_out_base": 0,
-        "rows_out_qa": 0,
+        "rows_out_aux": 0,
         "skipped_empty": 0,
         "control_in_tgt": 0,
         "bad_json": 0,
@@ -135,29 +135,29 @@ def _mix_split(base_path, qa_path, out_path, ratio, seed, max_rows=-1):
 
     rng = random.Random(seed)
     base_iter = _iter_lines(base_path, max_rows=max_rows)
-    qa_iter = _iter_selected_lines(qa_path, qa_indices) if qa_path else iter(())
+    aux_iter = _iter_selected_lines(aux_path, aux_indices) if aux_path else iter(())
 
     base_remaining = base_count
-    qa_remaining = qa_used_target
+    aux_remaining = aux_used_target
 
     with open(out_path, "w", encoding="utf-8") as fout:
-        while base_remaining > 0 or qa_remaining > 0:
+        while base_remaining > 0 or aux_remaining > 0:
             if base_remaining == 0:
-                line = next(qa_iter)
-                qa_remaining -= 1
-                _write_checked(line, "qa", fout, stats)
+                line = next(aux_iter)
+                aux_remaining -= 1
+                _write_checked(line, "aux", fout, stats)
                 continue
-            if qa_remaining == 0:
+            if aux_remaining == 0:
                 line = next(base_iter)
                 base_remaining -= 1
                 _write_checked(line, "base", fout, stats)
                 continue
 
-            p_qa = qa_remaining / (base_remaining + qa_remaining)
-            if rng.random() < p_qa:
-                line = next(qa_iter)
-                qa_remaining -= 1
-                _write_checked(line, "qa", fout, stats)
+            p_aux = aux_remaining / (base_remaining + aux_remaining)
+            if rng.random() < p_aux:
+                line = next(aux_iter)
+                aux_remaining -= 1
+                _write_checked(line, "aux", fout, stats)
             else:
                 line = next(base_iter)
                 base_remaining -= 1
@@ -168,13 +168,13 @@ def _mix_split(base_path, qa_path, out_path, ratio, seed, max_rows=-1):
         json.dumps(
             {
                 "base_path": base_path,
-                "qa_path": qa_path or "",
+                "aux_path": aux_path or "",
                 "out_path": out_path,
                 "rows_in_base": stats["rows_in_base"],
-                "rows_in_qa": stats["rows_in_qa"],
+                "rows_in_aux": stats["rows_in_aux"],
                 "rows_out": stats["rows_out"],
                 "rows_out_base": stats["rows_out_base"],
-                "rows_out_qa": stats["rows_out_qa"],
+                "rows_out_aux": stats["rows_out_aux"],
                 "skipped_empty": stats["skipped_empty"],
                 "control_in_tgt": stats["control_in_tgt"],
                 "control_in_tgt_pct": round(ctrl_pct, 4),
@@ -191,10 +191,10 @@ def _mix_split(base_path, qa_path, out_path, ratio, seed, max_rows=-1):
 
 
 def main():
-    _mix_split(BASE_TRAIN, QA_TRAIN, OUT_TRAIN, MIX_QA_RATIO, SEED, max_rows=MAX_ROWS)
+    _mix_split(BASE_TRAIN, AUX_TRAIN, OUT_TRAIN, MIX_QA_RATIO, SEED, max_rows=MAX_ROWS)
 
     if os.path.exists(BASE_VAL):
-        _mix_split(BASE_VAL, QA_VAL, OUT_VAL, MIX_QA_RATIO, SEED, max_rows=-1)
+        _mix_split(BASE_VAL, AUX_VAL, OUT_VAL, MIX_QA_RATIO, SEED, max_rows=-1)
     else:
         print(f"VAL base missing; skipping val mix ({BASE_VAL})")
 

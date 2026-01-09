@@ -15,9 +15,10 @@ from transformers import (
 
 from utils import seed_all, save_json
 
-TRAIN_PATH = os.environ.get("TRAIN_PATH", "data/decoder_train.jsonl")
-VAL_PATH = os.environ.get("VAL_PATH", "data/decoder_val.jsonl")
+TRAIN_PATH = os.environ.get("DECODER_TRAIN", os.environ.get("TRAIN_PATH", "data/decoder_train.jsonl"))
+VAL_PATH = os.environ.get("DECODER_VAL", os.environ.get("VAL_PATH", "data/decoder_val.jsonl"))
 OUT_DIR = os.environ.get("OUT_DIR", "out/decoder")
+RESUME_FROM = os.environ.get("RESUME_FROM", "")
 MODEL = os.environ.get("MODEL", "google/flan-t5-small")
 MAX_IN = int(os.environ.get("MAX_IN", "512"))
 MAX_OUT = int(os.environ.get("MAX_OUT", "96"))
@@ -251,6 +252,12 @@ def _tokenize_dataset(
 def main():
     seed_all(SEED, deterministic=DETERMINISTIC)
 
+    print(f"DECODER_TRAIN={TRAIN_PATH}")
+    print(f"DECODER_VAL={VAL_PATH}")
+    print(f"OUT_DIR={OUT_DIR}")
+    if RESUME_FROM:
+        print(f"RESUME_FROM={RESUME_FROM}")
+
     num_proc = NUM_PROC
     if os.name == "nt" and num_proc > 0:
         print("NUM_PROC>0 not supported on Windows; using NUM_PROC=0")
@@ -348,7 +355,7 @@ def main():
         data_collator=collator,
         tokenizer=tok,
     )
-    trainer.train()
+    trainer.train(resume_from_checkpoint=RESUME_FROM or None)
     trainer.save_model(OUT_DIR)
     tok.save_pretrained(OUT_DIR)
 

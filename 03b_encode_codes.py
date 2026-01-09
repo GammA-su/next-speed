@@ -13,20 +13,24 @@ META = os.environ.get("CODES_META", "data/codes.meta.json")
 
 K = int(os.environ.get("K", "8"))
 V = int(os.environ.get("V", "1024"))
+USE_FAISS_GPU = os.environ.get("USE_FAISS_GPU", "1") == "1"
+FAISS_GPU_DEVICE = int(os.environ.get("FAISS_GPU_DEVICE", "0"))
 SEED = int(os.environ.get("SEED", "0"))
 DETERMINISTIC = os.environ.get("DETERMINISTIC", "1") == "1"
 
 
-def encode_rvq(x, centroids):
+def encode_rvq(x, centroids, use_gpu=False, gpu_res=None, gpu_device=0):
     # x: (N,D) normalized
     n, d = x.shape
     codes = np.zeros((n, centroids.shape[0]), dtype=np.int32)
     residual = x.copy()
+    index = faiss.IndexFlatIP(d)
+    if use_gpu and gpu_res is not None:
+        index = faiss.index_cpu_to_gpu(gpu_res, gpu_device, index)
 
     for k in range(centroids.shape[0]):
-        C = centroids[k].astype("float32")
-        faiss.normalize_L2(C)
-        index = faiss.IndexFlatIP(d)
+        C = centroids[k]
+        index.reset()
         index.add(C)
         _, ids = index.search(residual, 1)
         ids = ids.reshape(-1)
@@ -43,14 +47,21 @@ def main():
     seed_all(SEED, deterministic=DETERMINISTIC)
     os.makedirs(os.path.dirname(OUT_CODES), exist_ok=True)
 
+    num_gpus = faiss.get_num_gpus() if hasattr(faiss, "get_num_gpus") else 0
+    use_gpu = USE_FAISS_GPU and num_gpus > 0 and hasattr(faiss, "StandardGpuResources")
+    print(
+        f"faiss_version={getattr(faiss, '__version__', 'unknown')} num_gpus={num_gpus} "
+        f"use_faiss_gpu={use_gpu} faiss_gpu_device={FAISS_GPU_DEVICE if use_gpu else 'n/a'}"
+    )
+
     print("Phase: load embeddings")
     x = np.load(EMB_PATH)
-    if x.dtype != np.float32:
-        x = x.astype("float32")
+    if x.dtype != np.float32 or not x.flags["C_CONTIGUOUS"]:
+        x = np.ascontiguousarray(x, dtype="float32")
 
     print("Phase: load RVQ centroids")
     rvq = np.load(RVQ_PATH)
-    centroids = rvq["centroids"].astype("float32")
+    centroids = np.ascontiguousarray(rvq["centroids"], dtype="float32")
     if centroids.ndim != 3:
         raise ValueError(f"Expected centroids to be 3D, got shape {centroids.shape}")
     if centroids.shape[0] != K:
@@ -58,9 +69,20 @@ def main():
     if centroids.shape[1] != V:
         raise ValueError(f"centroids V mismatch: {centroids.shape[1]} != V={V}")
 
+    d = centroids.shape[2]
+    faiss.normalize_L2(centroids.reshape(-1, d))
+
+    gpu_res = None
+    if use_gpu:
+        try:
+            gpu_res = faiss.StandardGpuResources()
+        except Exception:
+            use_gpu = False
+            print("Warning: failed to init FAISS GPU; falling back to CPU.")
+
     start = time.time()
     print("Phase: encode RVQ codes")
-    codes = encode_rvq(x, centroids)
+    codes = encode_rvq(x, centroids, use_gpu=use_gpu, gpu_res=gpu_res, gpu_device=FAISS_GPU_DEVICE)
     np.save(OUT_CODES, codes)
     elapsed = time.time() - start
     rate = codes.shape[0] / elapsed if elapsed > 0 else 0.0

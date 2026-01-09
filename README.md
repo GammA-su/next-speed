@@ -57,6 +57,40 @@ TRAIN_PATH=data/decoder_train_mix.jsonl VAL_PATH=data/decoder_val_mix.jsonl \
   uv run python 06_train_decoder.py
 ```
 
+## Step 5: Instruction/Dialog
+
+Pull instruction/chat datasets into local JSONL:
+```bash
+SEED=0 MAX_TRAIN=200000 MAX_VAL=5000 \
+  ULTRACHAT_FRACTION=0.5 OPENORCA_FRACTION=0.5 \
+  uv run python tools/pull_hf_instruct.py
+```
+
+Convert instruct JSONL into decoder rows:
+```bash
+K=4 V=256 RVQ_PATH=out/rvq.npz BS=512 DEVICE=cuda AMP=1 \
+  uv run python tools/make_instruct_decoder_jsonl.py
+```
+
+Mix base + QA (stage 1), then mix in instruct (stage 2):
+```bash
+# stage 1: base + QA
+MIX_QA_RATIO=0.30 \
+  BASE_TRAIN=data/decoder_train.jsonl AUX_TRAIN=data/decoder_train_qa.jsonl \
+  OUT_TRAIN=data/decoder_train_mix.jsonl \
+  BASE_VAL=data/decoder_val.jsonl AUX_VAL=data/decoder_val_qa.jsonl \
+  OUT_VAL=data/decoder_val_mix.jsonl \
+  uv run python tools/mix_decoder_jsonl.py
+
+# stage 2: (base+QA) + instruct
+MIX_QA_RATIO=0.20 \
+  BASE_TRAIN=data/decoder_train_mix.jsonl AUX_TRAIN=data/decoder_train_instruct.jsonl \
+  OUT_TRAIN=data/decoder_train_mix3.jsonl \
+  BASE_VAL=data/decoder_val_mix.jsonl AUX_VAL=data/decoder_val_instruct.jsonl \
+  OUT_VAL=data/decoder_val_mix3.jsonl \
+  uv run python tools/mix_decoder_jsonl.py
+```
+
 ## LLM-style inference
 
 Install the server extras (already in `pyproject.toml`):
