@@ -34,12 +34,13 @@ TRAIN_BS = int(os.environ.get("TRAIN_BS", "8"))
 LOGGING_STEPS = int(os.environ.get("LOGGING_STEPS", "50"))
 SAVE_STEPS = int(os.environ.get("SAVE_STEPS", "500"))
 MAX_ROWS = int(os.environ.get("MAX_ROWS", "-1"))
-NUM_PROC = int(os.environ.get("NUM_PROC", "0"))
 CACHE_TOKENIZED = int(os.environ.get("CACHE_TOKENIZED", "1")) == "1"
 TOKENIZED_CACHE_DIR = os.environ.get("TOKENIZED_CACHE_DIR", "out/cache/tokenized_decoder")
 KEEP_IN_MEMORY = int(os.environ.get("KEEP_IN_MEMORY", "0")) == "1"
 PRETOKENIZE_ONLY = int(os.environ.get("PRETOKENIZE_ONLY", "0")) == "1"
-MAP_BATCH_SIZE = int(os.environ.get("MAP_BATCH_SIZE", "1000"))
+_CPU_COUNT = os.cpu_count() or 1
+NUM_PROC = int(os.environ.get("NUM_PROC", str(min(16, _CPU_COUNT))))
+MAP_BATCH_SIZE = int(os.environ.get("MAP_BATCH_SIZE", "2000"))
 SEED = int(os.environ.get("SEED", "0"))
 DETERMINISTIC = os.environ.get("DETERMINISTIC", "1") == "1"
 FP16 = int(os.environ.get("FP16", "0"))
